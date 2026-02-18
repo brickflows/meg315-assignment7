@@ -35,7 +35,9 @@ ACCENT_YELLOW = '#fbbf24'; ACCENT_TEAL = '#14b8a6'
 
 def calculate_gas_cycle(p):
     T1, P1, rp, TIT = p['T1'], p['P1'], p['rp'], p['TIT']
-    eta_c, eta_t, eta_cc = p['eta_c'], p['eta_t'], p['eta_cc']
+    eta_c = p.get('eta_c', 1.0) or 1.0
+    eta_t = p.get('eta_t', 1.0) or 1.0
+    eta_cc = p.get('eta_cc', 1.0) or 1.0
     states = []
     h1, s1 = GasTable.h(T1), GasTable.s(T1, P1)
     states.append({'State':'1','Location':'Air Inlet','T(K)':T1,'P(kPa)':P1,'h(kJ/kg)':h1,'s(kJ/kgK)':s1})
@@ -64,15 +66,17 @@ def calculate_gas_cycle(p):
     w_net = w_t - w_c
     eta = w_net / q_in * 100 if q_in > 0 else 0
     bwr = w_c / w_t * 100 if w_t > 0 else 0
-    m_fuel = (q_in * p['m_air']) / p['LHV'] if p['LHV'] > 0 else 0
-    f_ratio = m_fuel / p['m_air'] if p['m_air'] > 0 else 0
+    # m_fuel and f_ratio only if m_air and LHV are provided
+    m_air = p.get('m_air'); LHV = p.get('LHV')
+    m_fuel = (q_in * m_air) / LHV if (m_air and LHV and LHV > 0) else None
+    f_ratio = m_fuel / m_air if (m_fuel is not None and m_air and m_air > 0) else None
     cp_avg = GasTable.cp_avg(T1, T4)
     gamma_avg = GasTable.gamma_avg(T1, T4)
     return {
         'states': states, 'df': pd.DataFrame(states),
         'w_c':w_c,'w_t':w_t,'q_in':q_in,'w_net':w_net,'eta':eta,'bwr':bwr,
         'm_fuel':m_fuel,'f_ratio':f_ratio,'T_exhaust':T5,
-        'cp_avg':cp_avg,'gamma_avg':gamma_avg,
+        'cp_avg':cp_avg,'gamma_avg':gamma_avg,'m_air':m_air,'LHV':LHV,
     }
 
 def calculate_steam_cycle(p):
@@ -117,11 +121,14 @@ def calculate_ad_htc(p, gas):
     biogas_vol = m_rich * p['ad_yield']
     rho_biogas = 1.15
     m_biogas = biogas_vol * rho_biogas
-    E_biogas = m_biogas * p['LHV']
-    E_demand = gas['m_fuel'] * p['LHV']
+    LHV = gas.get('LHV') or p.get('LHV') or 20000
+    E_biogas = m_biogas * LHV
+    m_fuel = gas.get('m_fuel') or 0
+    E_demand = m_fuel * LHV if m_fuel else 0
     renewable_frac = min(E_biogas / E_demand, 1.0) * 100 if E_demand > 0 else 0
-    htc_energy = m_lean * 1.5 * (p['htc_temp'] - 298)
-    surplus = m_biogas - gas['m_fuel']
+    htc_temp = p.get('htc_temp', 523) or 523
+    htc_energy = m_lean * 1.5 * (htc_temp - 298)
+    surplus = m_biogas - m_fuel if m_fuel else m_biogas
     return {
         'm_total':m_total,'m_rich':m_rich,'m_lean':m_lean,
         'biogas_vol':biogas_vol,'m_biogas':m_biogas,
@@ -385,66 +392,151 @@ class ADHTCApp(tk.Tk):
 
         # ── Core parameters (always visible) ──
         s = sec(sf, 'Gas Power Cycle (Brayton)')
-        ent(s,'T1','Ambient Temp T1 (K)',298); ent(s,'P1','Ambient Press P1 (kPa)',101.325)
-        ent(s,'rp','Pressure Ratio rp',10); ent(s,'TIT','Turbine Inlet Temp TIT (K)',1400)
-        ent(s,'eta_c','Compressor Eff eta_c',0.86); ent(s,'eta_t','Turbine Eff eta_t',0.89)
-        ent(s,'eta_cc','Combustion Eff eta_cc',0.98)
-        ent(s,'LHV','Biogas LHV (kJ/kg)',20000); ent(s,'m_air','Air Mass Flow (kg/s)',50)
+        ent(s,'T1','Ambient Temp T1 [K]',''); ent(s,'P1','Ambient Press P1 [kPa]','')
+        ent(s,'rp','Pressure Ratio rp',''); ent(s,'TIT','Turbine Inlet Temp TIT [K]','')
+        ent(s,'eta_c','Compressor Eff eta_c (blank = ideal)','')
+        ent(s,'eta_t','Turbine Eff eta_t (blank = ideal)','')
+        ent(s,'eta_cc','Combustion Eff eta_cc (blank = ideal)','')
+        ent(s,'LHV','Fuel LHV [kJ/kg] (for m_fuel calc)','')
+        ent(s,'m_air','Air Mass Flow [kg/s] (for MW output)','')
 
         s = sec(sf, 'HTC Steam Cycle (Rankine)')
-        ent(s,'P_boiler','Boiler Pressure (kPa)',4000); ent(s,'T_steam','Steam Temp (K)',673)
-        ent(s,'P_cond','Condenser Press (kPa)',10)
-        ent(s,'eta_st','ST Eff eta_st',0.85); ent(s,'eta_fp','Pump Eff eta_fp',0.80)
+        ent(s,'P_boiler','Boiler Pressure [kPa]',''); ent(s,'T_steam','Steam Temp [K]','')
+        ent(s,'P_cond','Condenser Press [kPa]','')
+        ent(s,'eta_st','ST Eff eta_st (blank = ideal)','')
+        ent(s,'eta_fp','Pump Eff eta_fp (blank = ideal)','')
 
-        # ── Advanced parameters (collapsed by default, defaults pre-filled) ──
-        s = sec(sf, 'HRSG Coupling', collapsible=True, collapsed=True)
-        ent(s,'T_stack','Stack Temp (K)',420); ent(s,'eta_hrsg','HRSG Effectiveness',0.85)
-        ent(s,'pinch_dT','Pinch Delta-T (K)',15)
+        # ── Advanced parameters (collapsed, optional) ──
+        s = sec(sf, 'HRSG Coupling (needs Gas+Steam+m_air)', collapsible=True, collapsed=True)
+        ent(s,'T_stack','Stack Temp [K] (default 420)','')
+        ent(s,'eta_hrsg','HRSG Effectiveness (default 0.85)','')
+        ent(s,'pinch_dT','Pinch Delta-T [K] (default 15)','')
 
-        s = sec(sf, 'Biomass / AD Parameters', collapsible=True, collapsed=True)
-        ent(s,'m_biomass','Biomass Feed (kg/s)',5); ent(s,'moisture_split','Moisture-Rich Frac',0.6)
-        ent(s,'ad_yield','AD Yield (m3/kg)',0.4); ent(s,'htc_temp','HTC Reactor Temp (K)',523)
+        s = sec(sf, 'Biomass / AD (needs Gas cycle)', collapsible=True, collapsed=True)
+        ent(s,'m_biomass','Biomass Feed [kg/s]',''); ent(s,'moisture_split','Moisture-Rich Fraction','')
+        ent(s,'ad_yield','AD Yield [m3/kg]',''); ent(s,'htc_temp','HTC Reactor Temp [K]','')
 
         # ── Analyse button ──
         bf = tk.Frame(sf, bg=CARD_BG); bf.pack(fill='x', padx=10, pady=10)
         tk.Button(bf, text='Analyse', font=('Segoe UI', 12, 'bold'), bg='#2563eb', fg='white',
                   activebackground='#3b82f6', activeforeground='white', relief='flat', cursor='hand2',
                   bd=0, padx=20, pady=10, command=self._run).pack(fill='x')
-        tk.Label(bf, text='All fields have defaults - just click Analyse!',
+        tk.Label(bf, text='Fill only the sections you need — leave the rest blank',
                  bg=CARD_BG, fg='#475569', font=('Segoe UI', 8)).pack(pady=(4, 0))
 
     def _get_p(self):
+        """Parse inputs — blank fields return None (optional), bad values show error."""
         p = {}
-        for k,e in self.entries.items():
-            try: p[k] = float(e.get())
-            except ValueError: messagebox.showerror('Input Error',f'Invalid: {k}'); return None
+        for k, e in self.entries.items():
+            raw = e.get().strip()
+            if raw == '':
+                p[k] = None  # not provided
+            else:
+                try:
+                    p[k] = float(raw)
+                except ValueError:
+                    messagebox.showerror('Input Error', f'Invalid value for "{k}": "{raw}"')
+                    return None
         return p
+
+    def _has_keys(self, p, keys):
+        """Check if all required keys are present (not None) in params."""
+        return all(p.get(k) is not None for k in keys)
 
     def _draw_initial_schematic(self):
         draw_schematic(self.fig_sch); self.cv_sch.draw()
 
     def _run(self):
         p = self._get_p()
-        if not p: return
-        # Input validation
-        warns_in = validate_inputs(p)
-        try:
-            gas = calculate_gas_cycle(p)
-            steam = calculate_steam_cycle(p)
-            ad = calculate_ad_htc(p, gas)
-            # HRSG coupling
+        if p is None: return
+
+        warns_in = validate_inputs({k: v for k, v in p.items() if v is not None})
+        gas = steam = ad = hrsg = exg = None
+
+        # ── Gas Cycle: requires T1, P1, rp, TIT ──
+        gas_keys = ['T1', 'P1', 'rp', 'TIT']
+        has_gas = self._has_keys(p, gas_keys)
+        if has_gas:
+            gp = {k: (v if v is not None else d) for k, v, d in [
+                ('T1', p['T1'], 298), ('P1', p['P1'], 101.325),
+                ('rp', p['rp'], 10), ('TIT', p['TIT'], 1400),
+                ('eta_c', p.get('eta_c'), 1.0), ('eta_t', p.get('eta_t'), 1.0),
+                ('eta_cc', p.get('eta_cc'), 1.0),
+                ('LHV', p.get('LHV'), None), ('m_air', p.get('m_air'), None),
+            ]}
+            try:
+                gas = calculate_gas_cycle(gp)
+            except Exception as e:
+                messagebox.showerror('Gas Cycle Error', str(e)); return
+
+        # ── Steam Cycle: requires P_boiler, T_steam, P_cond ──
+        steam_keys = ['P_boiler', 'T_steam', 'P_cond']
+        has_steam = self._has_keys(p, steam_keys)
+        if has_steam:
+            sp = {k: (p.get(k) if p.get(k) is not None else d) for k, d in [
+                ('P_boiler', 4000), ('T_steam', 673), ('P_cond', 10),
+                ('eta_st', 1.0), ('eta_fp', 1.0),
+            ]}
+            if p.get('eta_st') is not None: sp['eta_st'] = p['eta_st']
+            if p.get('eta_fp') is not None: sp['eta_fp'] = p['eta_fp']
+            try:
+                steam = calculate_steam_cycle(sp)
+            except Exception as e:
+                messagebox.showerror('Steam Cycle Error', str(e)); return
+
+        # ── HRSG: requires Gas + Steam + coupling params ──
+        has_hrsg = (gas is not None and steam is not None and
+                    p.get('m_air') is not None)
+        if has_hrsg:
+            T_stack = p.get('T_stack') or 420
+            eta_hrsg = p.get('eta_hrsg') or 0.85
+            pinch_dT = p.get('pinch_dT') or 15
             cp_exh = GasTable.cp_avg(gas['T_exhaust'], p['T1'])
-            hrsg = calculate_hrsg(gas['T_exhaust'], p['T_stack'], p['m_air'], cp_exh,
-                                  p['eta_hrsg'], p['pinch_dT'], steam['q_boiler'])
-            exg = calculate_exergy(gas, steam, p)
-        except Exception as e:
-            messagebox.showerror('Calculation Error',str(e)); return
-        warns_out = validate_results(gas, steam, ad, hrsg)
+            try:
+                hrsg = calculate_hrsg(gas['T_exhaust'], T_stack, p['m_air'], cp_exh,
+                                      eta_hrsg, pinch_dT, steam['q_boiler'])
+            except Exception as e:
+                messagebox.showerror('HRSG Error', str(e)); return
+
+        # ── AD/Biomass: requires biomass params ──
+        ad_keys = ['m_biomass', 'moisture_split', 'ad_yield']
+        has_ad = self._has_keys(p, ad_keys) and gas is not None
+        if has_ad:
+            try:
+                ad = calculate_ad_htc(p, gas)
+            except Exception as e:
+                messagebox.showerror('AD Error', str(e)); return
+
+        # ── Exergy: requires Gas + m_air ──
+        if gas and p.get('m_air') is not None:
+            try:
+                exg = calculate_exergy(gas, steam, p)
+            except Exception:
+                exg = None
+
+        # Post-calculation validation
+        warns_out = []
+        if gas and steam and ad and hrsg:
+            warns_out = validate_results(gas, steam, ad, hrsg or {})
+        elif gas:
+            if gas.get('w_net', 0) <= 0:
+                warns_out.append(('danger', f"Negative net gas work ({gas['w_net']:.1f} kJ/kg)"))
+
         all_warns = warns_in + warns_out
-        plot_hs_chart(self.fig_hs, steam); self.cv_hs.draw()
-        plot_th_chart(self.fig_th, gas); self.cv_th.draw()
+
+        if not has_gas and not has_steam:
+            messagebox.showinfo('No Data', 'Please fill at least the Gas Cycle (T1, P1, rp, TIT) '
+                                'or Steam Cycle (P_boiler, T_steam, P_cond) parameters.')
+            return
+
+        # Plot what we have
+        if steam:
+            plot_hs_chart(self.fig_hs, steam); self.cv_hs.draw()
+        if gas:
+            plot_th_chart(self.fig_th, gas); self.cv_th.draw()
+
         self._fill_tables(gas, steam, ad, hrsg, exg, p, all_warns)
-        self.nb.select(1)
+        self.nb.select(3 if gas or steam else 0)  # go to Results tab
 
     def _fill_tables(self, gas, steam, ad, hrsg, exg, p, warns):
         for w in self.tbl_f.winfo_children(): w.destroy()
@@ -477,68 +569,93 @@ class ADHTCApp(tk.Tk):
                 tk.Label(wf,text=f'[{icon}] {msg}',fg=col,bg=CARD_BG,font=('Segoe UI',8),
                          anchor='w',wraplength=600,justify='left').pack(fill='x',pady=1)
 
-        # ── Combined Performance ──
-        W_GT = gas['w_t'] * p['m_air'] / 1000  # MW
-        W_comp = gas['w_c'] * p['m_air'] / 1000
-        W_net_gas = gas['w_net'] * p['m_air'] / 1000
-        m_st = hrsg['m_steam']
-        W_ST = steam['w_st'] * m_st / 1000
-        W_pump = steam['w_fp'] * m_st / 1000
-        W_net_steam = steam['w_net'] * m_st / 1000
-        W_net_comb = W_net_gas + W_net_steam
-        Q_in_total = gas['q_in'] * p['m_air'] / 1000
-        eta_comb = W_net_comb / Q_in_total * 100 if Q_in_total > 0 else 0
-        cf = card(inner,'Combined Cycle Performance')
-        metric_grid(cf, [
-            ('W_GT [MW]', f'{W_GT:.2f}'), ('W_Comp [MW]', f'{W_comp:.2f}'),
-            ('W_net,gas [MW]', f'{W_net_gas:.2f}'), ('Gas eta [%]', f'{gas["eta"]:.1f}'),
-            ('W_ST [MW]', f'{W_ST:.2f}'), ('W_Pump [MW]', f'{W_pump:.3f}'),
-            ('W_net,steam [MW]', f'{W_net_steam:.2f}'), ('Steam eta [%]', f'{steam["eta"]:.1f}'),
-            ('W_net,combined [MW]', f'{W_net_comb:.2f}'), ('eta_combined [%]', f'{eta_comb:.1f}'),
-            ('BWR [%]', f'{gas["bwr"]:.1f}'), ('Q_in [MW]', f'{Q_in_total:.2f}'),
-        ])
+        # ── Gas Cycle Results ──
+        if gas:
+            m_air = gas.get('m_air')
+            items_gas = [
+                ('w_comp [kJ/kg]', f'{gas["w_c"]:.1f}'), ('w_turb [kJ/kg]', f'{gas["w_t"]:.1f}'),
+                ('w_net [kJ/kg]', f'{gas["w_net"]:.1f}'), ('q_in [kJ/kg]', f'{gas["q_in"]:.1f}'),
+                ('eta_Brayton [%]', f'{gas["eta"]:.1f}'), ('BWR [%]', f'{gas["bwr"]:.1f}'),
+                ('Cp_avg [kJ/kgK]', f'{gas["cp_avg"]:.4f}'), ('gamma_avg', f'{gas["gamma_avg"]:.4f}'),
+                ('T_exhaust [K]', f'{gas["T_exhaust"]:.0f}'), ('Model', 'T3-constrained'),
+            ]
+            if gas.get('f_ratio') is not None:
+                items_gas.append(('Fuel-Air Ratio f', f'{gas["f_ratio"]:.4f}'))
+            if gas.get('m_fuel') is not None:
+                items_gas.append(('m_fuel [kg/s]', f'{gas["m_fuel"]:.2f}'))
+            if m_air:
+                items_gas.append(('W_GT [MW]', f'{gas["w_t"] * m_air / 1000:.2f}'))
+                items_gas.append(('W_comp [MW]', f'{gas["w_c"] * m_air / 1000:.2f}'))
+                items_gas.append(('W_net,gas [MW]', f'{gas["w_net"] * m_air / 1000:.2f}'))
+            cf = card(inner, 'Gas Cycle Results', fg=ACCENT_BLUE)
+            metric_grid(cf, items_gas, fg=ACCENT_BLUE)
+            self._tree(inner, 'Gas Cycle State Points', gas['df'],
+                       ['State','Location','T(K)','P(kPa)','h(kJ/kg)','s(kJ/kgK)'])
 
-        # ── Gas Properties ──
-        gf = card(inner,'Gas Cycle Properties',fg=ACCENT_BLUE)
-        metric_grid(gf, [
-            ('Cp_avg [kJ/kgK]', f'{gas["cp_avg"]:.4f}'), ('gamma_avg', f'{gas["gamma_avg"]:.4f}'),
-            ('Fuel-Air Ratio f', f'{gas["f_ratio"]:.4f}'), ('m_fuel [kg/s]', f'{gas["m_fuel"]:.2f}'),
-            ('T_exhaust [K]', f'{gas["T_exhaust"]:.0f}'), ('Combustion model', 'T3-constrained'),
-        ], fg=ACCENT_BLUE)
+        # ── Steam Cycle Results ──
+        if steam:
+            items_st = [
+                ('w_ST [kJ/kg]', f'{steam["w_st"]:.1f}'), ('w_pump [kJ/kg]', f'{steam["w_fp"]:.2f}'),
+                ('w_net [kJ/kg]', f'{steam["w_net"]:.1f}'), ('q_boiler [kJ/kg]', f'{steam["q_boiler"]:.1f}'),
+                ('q_cond [kJ/kg]', f'{steam["q_cond"]:.1f}'), ('eta_Rankine [%]', f'{steam["eta"]:.1f}'),
+            ]
+            cf = card(inner, 'Steam Cycle Results', fg=ACCENT_PURPLE)
+            metric_grid(cf, items_st, fg=ACCENT_PURPLE)
+            self._tree(inner, 'Steam Cycle State Points', steam['df'],
+                       ['State','Location','T(K)','P(kPa)','h(kJ/kg)','s(kJ/kgK)','x'])
 
-        # ── HRSG ──
-        hf = card(inner,'HRSG Heat Recovery',fg=ACCENT_ORANGE)
-        metric_grid(hf, [
-            ('Q_available [kW]', f'{hrsg["Q_available"]:.0f}'), ('Q_recovered [kW]', f'{hrsg["Q_recovered"]:.0f}'),
-            ('m_steam [kg/s]', f'{hrsg["m_steam"]:.2f}'), ('T_stack [K]', f'{hrsg["T_stack_actual"]:.0f}'),
-            ('Pinch OK', 'Yes' if hrsg['pinch_ok'] else 'NO'),
-        ], fg=ACCENT_ORANGE)
+        # ── Combined Performance (only if both cycles + m_air) ──
+        if gas and steam and gas.get('m_air') and hrsg:
+            m_air = gas['m_air']
+            m_st = hrsg['m_steam']
+            W_GT = gas['w_t']*m_air/1000; W_comp = gas['w_c']*m_air/1000
+            W_net_gas = gas['w_net']*m_air/1000
+            W_ST = steam['w_st']*m_st/1000; W_pump = steam['w_fp']*m_st/1000
+            W_net_steam = steam['w_net']*m_st/1000
+            W_net_comb = W_net_gas + W_net_steam
+            Q_in_total = gas['q_in']*m_air/1000
+            eta_comb = W_net_comb/Q_in_total*100 if Q_in_total > 0 else 0
+            cf = card(inner, 'Combined Cycle Performance')
+            metric_grid(cf, [
+                ('W_GT [MW]', f'{W_GT:.2f}'), ('W_Comp [MW]', f'{W_comp:.2f}'),
+                ('W_net,gas [MW]', f'{W_net_gas:.2f}'), ('W_ST [MW]', f'{W_ST:.2f}'),
+                ('W_Pump [MW]', f'{W_pump:.3f}'), ('W_net,steam [MW]', f'{W_net_steam:.2f}'),
+                ('W_net,combined [MW]', f'{W_net_comb:.2f}'), ('eta_combined [%]', f'{eta_comb:.1f}'),
+            ])
 
-        # ── AD Balance ──
-        af = card(inner,'AD-HTC Mass & Energy Balance',fg=ACCENT_GREEN)
-        status = 'SURPLUS' if ad['surplus'] >= 0 else 'DEFICIT'
-        metric_grid(af, [
-            ('Biomass [kg/s]', f'{ad["m_total"]:.2f}'), ('Moist-Rich->AD [kg/s]', f'{ad["m_rich"]:.2f}'),
-            ('Moist-Lean->HTC [kg/s]', f'{ad["m_lean"]:.2f}'), ('Biogas [m3/s]', f'{ad["biogas_vol"]:.2f}'),
-            ('m_biogas [kg/s]', f'{ad["m_biogas"]:.2f}'), ('E_biogas [kW]', f'{ad["E_biogas"]:.0f}'),
-            ('Fuel Demand [kg/s]', f'{gas["m_fuel"]:.2f}'), ('Renewable [%]', f'{ad["renewable_frac"]:.0f}'),
-            ('Supply vs Demand', status), ('HTC Energy [kW]', f'{ad["htc_energy"]:.0f}'),
-        ], fg=ACCENT_GREEN)
+        # ── HRSG (only if computed) ──
+        if hrsg:
+            hf = card(inner,'HRSG Heat Recovery',fg=ACCENT_ORANGE)
+            metric_grid(hf, [
+                ('Q_available [kW]', f'{hrsg["Q_available"]:.0f}'), ('Q_recovered [kW]', f'{hrsg["Q_recovered"]:.0f}'),
+                ('m_steam [kg/s]', f'{hrsg["m_steam"]:.2f}'), ('T_stack [K]', f'{hrsg["T_stack_actual"]:.0f}'),
+                ('Pinch OK', 'Yes' if hrsg['pinch_ok'] else 'NO'),
+            ], fg=ACCENT_ORANGE)
 
-        # ── Second-Law ──
-        ef = card(inner,'Second-Law (Exergy) Analysis',fg=ACCENT_PURPLE)
-        metric_grid(ef, [
-            ('I_comp [kW]', f'{exg["I_comp"]:.0f}'), ('I_comb [kW]', f'{exg["I_comb"]:.0f}'),
-            ('I_turb [kW]', f'{exg["I_turb"]:.0f}'), ('I_total [kW]', f'{exg["I_total"]:.0f}'),
-            ('S_gen [kW/K]', f'{exg["S_gen_total"]:.2f}'), ('E_fuel [kW]', f'{exg["E_fuel"]:.0f}'),
-            ('eta_II [%]', f'{exg["eta_II"]:.1f}'),
-        ], fg=ACCENT_PURPLE)
+        # ── AD Balance (only if computed) ──
+        if ad:
+            af = card(inner,'AD-HTC Mass & Energy Balance',fg=ACCENT_GREEN)
+            status = 'SURPLUS' if ad['surplus'] >= 0 else 'DEFICIT'
+            items_ad = [
+                ('Biomass [kg/s]', f'{ad["m_total"]:.2f}'), ('Moist-Rich->AD [kg/s]', f'{ad["m_rich"]:.2f}'),
+                ('Moist-Lean->HTC [kg/s]', f'{ad["m_lean"]:.2f}'), ('Biogas [m3/s]', f'{ad["biogas_vol"]:.2f}'),
+                ('m_biogas [kg/s]', f'{ad["m_biogas"]:.2f}'), ('E_biogas [kW]', f'{ad["E_biogas"]:.0f}'),
+                ('Supply vs Demand', status), ('HTC Energy [kW]', f'{ad["htc_energy"]:.0f}'),
+            ]
+            if gas and gas.get('m_fuel') is not None:
+                items_ad.insert(6, ('Fuel Demand [kg/s]', f'{gas["m_fuel"]:.2f}'))
+                items_ad.insert(7, ('Renewable [%]', f'{ad["renewable_frac"]:.0f}'))
+            metric_grid(af, items_ad, fg=ACCENT_GREEN)
 
-        # ── State Tables ──
-        self._tree(inner,'Gas Cycle State Points',gas['df'],
-                   ['State','Location','T(K)','P(kPa)','h(kJ/kg)','s(kJ/kgK)'])
-        self._tree(inner,'Steam Cycle State Points',steam['df'],
-                   ['State','Location','T(K)','P(kPa)','h(kJ/kg)','s(kJ/kgK)','x'])
+        # ── Second-Law (only if computed) ──
+        if exg:
+            ef = card(inner,'Second-Law (Exergy) Analysis',fg=ACCENT_PURPLE)
+            metric_grid(ef, [
+                ('I_comp [kW]', f'{exg["I_comp"]:.0f}'), ('I_comb [kW]', f'{exg["I_comb"]:.0f}'),
+                ('I_turb [kW]', f'{exg["I_turb"]:.0f}'), ('I_total [kW]', f'{exg["I_total"]:.0f}'),
+                ('S_gen [kW/K]', f'{exg["S_gen_total"]:.2f}'), ('E_fuel [kW]', f'{exg["E_fuel"]:.0f}'),
+                ('eta_II [%]', f'{exg["eta_II"]:.1f}'),
+            ], fg=ACCENT_PURPLE)
 
     def _tree(self, parent, title, df, cols):
         lf = tk.LabelFrame(parent,text=title,bg=CARD_BG,fg=ACCENT_CYAN,font=('Segoe UI',10,'bold'),padx=10,pady=8)
